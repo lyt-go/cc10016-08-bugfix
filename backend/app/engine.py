@@ -109,8 +109,21 @@ def chain_schedule_session_proxy_rate(schedule_id: int) -> dict[str, Any]:
 
     rate_rels = store.get_relations("source_to_rate_limit", source_module="crawl_source", source_id=source_id)
     token_result: dict[str, Any] = {"allowed": True, "reason": "未绑定限流策略"}
+    quota_batch: dict[str, Any] | None = None
     if rate_rels:
-        token_result = rate_svc.acquire_token(rate_rels[-1]["target_id"])
+        rate_limit_id = int(rate_rels[-1]["target_id"])
+        # 频次控制作为主处理模块生成配额审计批次，会话管理再消费该批次。
+        quota_batch = rate_svc.submit_quota_batch(
+            rate_limit_id,
+            [{"url": f"/api/execute/{schedule_id}", "session_id": sess_id, "seq": 1}],
+            batch_id=f"chain-{schedule_id}-{sess_id}",
+        )
+        audit_items = quota_batch.get("audit_items", [])
+        token_result = audit_items[0] if audit_items else {"allowed": False, "reason": "配额审计批次为空"}
+        # 跨模块衔接：只把已获得序号且结果为允许的请求写入会话日志。
+        sess_svc.consume_quota_batch(
+            sess_id, rate_limit_id,
+            batch_id=quota_batch.get("batch_id"), audit_items=audit_items)
 
     return {
         "ok": True,
@@ -119,6 +132,7 @@ def chain_schedule_session_proxy_rate(schedule_id: int) -> dict[str, Any]:
         "session_id": sess_id,
         "proxy_id": proxy_id,
         "token": token_result,
+        "quota_batch": quota_batch,
         "plan_batches": plan.get("plan", {}).get("batches"),
     }
 

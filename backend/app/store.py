@@ -30,6 +30,11 @@ class Store:
             "data_validate_reports": {},     # data_validate 校验报告
             "result_store_partitions": {},   # result_store 分区元数据
             "rate_limit_states": {},         # rate_limit 令牌桶状态
+            "quota_audit_batches": {},       # rate_limit 配额审计批次（按限流策略ID归档）
+            "quota_audit_idempotency": {},   # 幂等键 -> 审计项定位（策略ID维度）
+            "quota_audit_seq": {},           # 每个限流策略的稳定配额序号水位
+            "quota_batch_locks": set(),      # 并发写入批次锁，只保留一份处理结果
+            "session_quota_consumed": {},    # session_mgr 已消费的配额批次/审计项（防重复写日志）
         }
         # 模块间关系索引（外键映射）——基于 seed 数据自动构建
         self._relations: dict[str, list[dict[str, Any]]] = {

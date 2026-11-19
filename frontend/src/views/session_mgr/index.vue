@@ -48,6 +48,9 @@
             >
               {{ action }}
             </button>
+            <button class="link" type="button" :data-testid="`consume-${row.id}`" @click="openConsumePanel(row)">
+              消费配额批次
+            </button>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -55,6 +58,66 @@
         </tr>
       </tbody>
     </table>
+
+    <div v-if="consumeTarget" class="quota-panel" data-testid="consume-panel">
+      <header class="page-head">
+        <div>
+          <h3>配额审计批次消费 · {{ consumeTarget['会话编号'] }}</h3>
+          <p class="page-desc">
+            只把已获得稳定配额序号且结果为「允许请求」的审计项写入会话日志；
+            拒绝请求、幂等重放与重复消费均跳过。
+          </p>
+        </div>
+        <div class="page-actions">
+          <button class="btn ghost" type="button" @click="consumeTarget = null">关闭面板</button>
+        </div>
+      </header>
+
+      <form class="analysis-form" @submit.prevent="consumeBatch">
+        <label>
+          限流策略ID
+          <input v-model.number="rateLimitId" data-testid="consume-rate-id" type="number" min="1" required />
+        </label>
+        <label>
+          配额审计批次ID
+          <input v-model="batchId" data-testid="consume-batch-id" placeholder="例如 ui-1700000000000" required />
+        </label>
+        <button class="btn primary" data-testid="consume-submit" type="button" :disabled="consuming" @click="consumeBatch">
+          {{ consuming ? '消费中…' : '消费审计批次' }}
+        </button>
+      </form>
+
+      <div v-if="consumeResult" class="quota-result" data-testid="consume-result">
+        <p class="page-desc">
+          写入日志 <strong>{{ consumeResult.written }}</strong> 条 ·
+          跳过拒绝 {{ consumeResult.skipped_denied }} 条 ·
+          跳过重放 {{ consumeResult.skipped_replay }} 条 ·
+          跳过重复 {{ consumeResult.skipped_duplicate }} 条 ·
+          会话请求计数 {{ consumeResult.request_count }}
+        </p>
+      </div>
+
+      <h4>会话请求日志（与列表页/详情页同源）</h4>
+      <table class="data-table" data-testid="session-request-log">
+        <thead>
+          <tr><th>计数</th><th>URL</th><th>配额序号</th><th>审计ID</th><th>幂等键</th><th>判定</th><th>剩余配额</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="log in requestLogs" :key="`${log.audit_id ?? 'legacy'}-${log.count}`" :data-testid="`log-row-${log.count}`">
+            <td>{{ log.count }}</td>
+            <td>{{ log.url }}</td>
+            <td>{{ log.quota_seq ?? '—' }}</td>
+            <td>{{ log.audit_id ?? '—' }}</td>
+            <td>{{ log.idempotency_key ?? '—' }}</td>
+            <td>{{ log.decision ?? '普通记录' }}</td>
+            <td>{{ log.remaining_quota ?? '—' }}</td>
+          </tr>
+          <tr v-if="!requestLogs.length">
+            <td colspan="7" class="empty-state">该会话暂无请求日志</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
 
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate">
@@ -85,6 +148,23 @@ import { computed, onMounted, ref } from 'vue'
 import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
+type RequestLog = {
+  count: number
+  url: string
+  latency?: number
+  quota_seq?: number
+  audit_id?: string
+  idempotency_key?: string
+  decision?: string
+  remaining_quota?: number
+}
+type ConsumeResult = {
+  written: number
+  skipped_denied: number
+  skipped_replay: number
+  skipped_duplicate: number
+  request_count: number
+}
 
 const ENDPOINT = '/api/session_mgr'
 const columns = ["会话编号", "关联源", "登录状态", "最后活动", "请求计数", "Cookie摘要", "UserAgent", "会话时长"]
@@ -105,6 +185,13 @@ const stats = computed(() => [
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
   { label: metricNames[2], value: rows.value.filter((row) => row.status === statuses[statuses.length - 1]).length },
 ])
+
+const consumeTarget = ref<Row | null>(null)
+const requestLogs = ref<RequestLog[]>([])
+const rateLimitId = ref<number | null>(null)
+const batchId = ref('')
+const consuming = ref(false)
+const consumeResult = ref<ConsumeResult | null>(null)
 
 function resetFilters() {
   filters.value = {}
@@ -179,10 +266,74 @@ async function reload() {
     const payload = await response.json()
     rows.value = payload.items ?? []
     total.value = payload.total ?? rows.value.length
+    if (consumeTarget.value) {
+      const refreshed = rows.value.find((row) => String(row.id) === String(consumeTarget.value?.id))
+      if (refreshed) consumeTarget.value = refreshed
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '会话管理列表读取失败'
   }
 }
 
+async function openConsumePanel(row: Row) {
+  consumeTarget.value = row
+  consumeResult.value = null
+  batchId.value = ''
+  await loadRequestLog()
+}
+
+async function loadRequestLog() {
+  if (!consumeTarget.value) return
+  try {
+    const response = await request(`${ENDPOINT}/${consumeTarget.value.id}`)
+    if (!response.ok) throw new Error('会话明细读取失败')
+    const payload = await response.json()
+    requestLogs.value = (payload._request_log ?? []) as RequestLog[]
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '会话请求日志读取失败'
+  }
+}
+
+async function consumeBatch() {
+  if (!consumeTarget.value || !rateLimitId.value || !batchId.value) {
+    errorMessage.value = '请填写限流策略ID与配额审计批次ID'
+    return
+  }
+  consuming.value = true
+  errorMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/${consumeTarget.value.id}/consume-quota-batch`, {
+      method: 'POST',
+      body: JSON.stringify({ rate_limit_id: rateLimitId.value, batch_id: batchId.value }),
+    })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.detail || '配额审计批次消费失败')
+    consumeResult.value = payload as ConsumeResult
+    await loadRequestLog()
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '配额审计批次消费失败'
+  } finally {
+    consuming.value = false
+  }
+}
+
 onMounted(reload)
 </script>
+
+<style scoped>
+.quota-panel {
+  margin: 16px 0;
+  padding: 14px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.quota-result {
+  margin: 14px 0;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+</style>

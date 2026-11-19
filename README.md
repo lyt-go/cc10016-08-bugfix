@@ -75,5 +75,21 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 配额审计批次（频次控制 → 会话管理）
+
+批量会话请求统一走配额审计批次，避免绕过当日配额、重复扣减与列表/详情错位：
+
+- `POST /api/rate_limit/{id}/quota-batches`：支持批量、多选、一次提交整组，逐条返回
+  允许请求、拒绝请求、稳定配额序号（`quota_seq`）与剩余配额。
+- 每条请求只消耗一个稳定序号，拒绝项同样登记序号；漏记/乱序序号在批次里标记
+  `order_violation`，审计行始终与真实请求逐条对齐。
+- 同一 `idempotency_key` 只产生一份有效扣减：默认 `reuse_first` 沿用首次序号，
+  重放返回幂等重放行且不二次扣减；`reassign` + `version_preference=latest` 时
+  旧序号保留为失败审计项、新序号重新判定，同一幂等键仍只有一份有效扣减。
+- 并发提交同一 `batch_id` 只保留一份审计结果（`concurrent_writes` 记录命中次数）。
+- `GET /api/rate_limit/{id}/quota-batches` 读取历史批次，存量历史结构自动补齐字段。
+- `POST /api/session_mgr/{id}/consume-quota-batch`：会话管理消费审计批次，只把
+  已获得序号且结果为允许、且非重放的审计项写入会话请求日志，同一审计项只消费一次。
+
 领域：数据工程
 子方向：数据采集、爬虫与RPA

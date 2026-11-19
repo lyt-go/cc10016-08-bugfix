@@ -110,3 +110,21 @@ def rotate_session(payload: dict[str, object]) -> dict:
     if sess is None:
         return {"ok": False, "error": "无可用会话"}
     return {"ok": True, "session": sess}
+
+
+@router.post("/{entry_id}/consume-quota-batch")
+def consume_quota_batch(entry_id: int, payload: dict[str, object]) -> dict:
+    """消费频次控制的配额审计批次，仅把已获序号且允许的请求写入会话日志。"""
+    rate_limit_id = payload.get("rate_limit_id")
+    if rate_limit_id is None:
+        raise HTTPException(status_code=400, detail="缺少 rate_limit_id")
+    audit_items = payload.get("audit_items")
+    result = service.consume_quota_batch(
+        entry_id,
+        int(rate_limit_id),
+        batch_id=str(payload["batch_id"]) if payload.get("batch_id") else None,
+        audit_items=audit_items if isinstance(audit_items, list) else None,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "配额审计批次消费失败"))
+    return result

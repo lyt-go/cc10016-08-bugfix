@@ -102,3 +102,46 @@ def acquire_token(entry_id: int) -> dict:
 def release_token(entry_id: int) -> dict:
     """释放令牌回桶。"""
     return service.release_token(entry_id)
+
+
+@router.post("/{entry_id}/quota-batches")
+def submit_quota_batch(entry_id: int, payload: dict[str, object]) -> dict:
+    """批量、多选、一次提交整组采集请求，返回逐条配额审计批次。
+
+    每条请求只消耗一个稳定配额序号；同一幂等键重放复用首次结果，不重复扣减。
+    """
+    requests = payload.get("requests")
+    if not isinstance(requests, list):
+        raise HTTPException(status_code=400, detail="requests 必须是批量请求数组")
+    result = service.submit_quota_batch(
+        entry_id,
+        requests,
+        batch_id=str(payload["batch_id"]) if payload.get("batch_id") else None,
+        retry_policy=str(payload.get("retry_policy", "reuse_first")),
+        version_preference=str(payload.get("version_preference", "first")),
+        idempotency_prefix=str(payload.get("idempotency_prefix", "")),
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "配额审计批次生成失败"))
+    return result
+
+
+@router.get("/quota-batches/all")
+def list_all_audit_batches() -> dict:
+    """读取全部限流策略的配额审计批次（跨模块取数链路）。"""
+    return {"items": service.list_audit_batches()}
+
+
+@router.get("/{entry_id}/quota-batches")
+def list_audit_batches(entry_id: int) -> dict:
+    """读取单条限流策略的配额审计批次列表。"""
+    return {"items": service.list_audit_batches(entry_id)}
+
+
+@router.get("/{entry_id}/quota-batches/{batch_key:path}")
+def get_audit_batch(entry_id: int, batch_key: str) -> dict:
+    """读取单个配额审计批次，逐条查看允许、拒绝与剩余配额。"""
+    batch = service.get_audit_batch(entry_id, batch_key)
+    if batch is None:
+        raise HTTPException(status_code=404, detail=f"配额审计批次 {batch_key} 不存在")
+    return batch
